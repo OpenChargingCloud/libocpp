@@ -13,14 +13,18 @@
 #include <ocpp1_6/types.hpp>
 
 namespace ocpp1_6 {
-ChargePointConfiguration::ChargePointConfiguration(json config, std::string configs_path, std::string schemas_path,
-                                                   std::string database_path) {
+ChargePointConfiguration::ChargePointConfiguration(const json& config, const std::string& ocpp_main_path,
+                                                   const std::string& user_config_path) {
 
-    this->configs_path = configs_path;
-    this->pki_handler = std::make_shared<PkiHandler>(configs_path);
+    this->user_config_path = boost::filesystem::path(user_config_path);
+    if (!boost::filesystem::exists(this->user_config_path)) {
+        EVLOG_critical << "User config file does not exist";
+        throw std::runtime_error("User config file does not exist");
+    }
+    this->pki_handler = std::make_shared<PkiHandler>(ocpp_main_path);
 
     // validate config entries
-    Schemas schemas = Schemas(schemas_path);
+    Schemas schemas = Schemas(ocpp_main_path);
     auto patch = schemas.get_profile_validator()->validate(config);
     if (patch.is_null()) {
         // no defaults substituted
@@ -62,138 +66,6 @@ ChargePointConfiguration::ChargePointConfiguration(json config, std::string conf
         throw std::runtime_error("Core profile not listed in SupportedFeatureProfiles. This is required.");
     }
 
-    // open and initialize database
-    std::string sqlite_db_filename = this->config["Internal"]["ChargePointId"].get<std::string>() + ".db";
-    boost::filesystem::path database_directory = boost::filesystem::path(database_path);
-    if (!boost::filesystem::exists(database_directory)) {
-        boost::filesystem::create_directories(database_directory);
-    }
-    boost::filesystem::path sqlite_db_path = database_directory / sqlite_db_filename;
-
-    int ret = sqlite3_open(sqlite_db_path.c_str(), &this->db);
-
-    if (ret != SQLITE_OK) {
-        EVLOG_error << "Error opening database '" << sqlite_db_path << "': " << sqlite3_errmsg(db);
-        throw std::runtime_error("Could not open database at provided path.");
-    }
-
-    EVLOG_debug << "sqlite version: " << sqlite3_libversion();
-
-    // prepare the database
-    std::string create_sql = "CREATE TABLE IF NOT EXISTS CONNECTORS ("
-                             "ID INT PRIMARY KEY     NOT NULL,"
-                             "AVAILABILITY           TEXT);";
-
-    sqlite3_stmt* create_statement;
-    sqlite3_prepare_v2(this->db, create_sql.c_str(), create_sql.size(), &create_statement, NULL);
-    int res = sqlite3_step(create_statement);
-    if (res != SQLITE_DONE) {
-        EVLOG_error << "Could not create table: " << res << sqlite3_errmsg(this->db);
-        throw std::runtime_error("db access error");
-    }
-
-    if (sqlite3_finalize(create_statement) != SQLITE_OK) {
-        EVLOG_error << "Error creating table";
-        throw std::runtime_error("db access error");
-    }
-
-    for (int32_t i = 1; i <= this->getNumberOfConnectors(); i++) {
-        std::ostringstream insert_sql;
-        insert_sql << "INSERT OR IGNORE INTO CONNECTORS (ID, AVAILABILITY) VALUES (" << i << ", \""
-                   << conversions::availability_type_to_string(AvailabilityType::Operative) << "\")";
-        std::string insert_sql_str = insert_sql.str();
-        sqlite3_stmt* insert_statement;
-        sqlite3_prepare_v2(this->db, insert_sql_str.c_str(), insert_sql_str.size(), &insert_statement, NULL);
-        int res = sqlite3_step(insert_statement);
-        if (res != SQLITE_DONE) {
-            EVLOG_error << "Could not insert into table: " << res << sqlite3_errmsg(this->db);
-            throw std::runtime_error("db access error");
-        }
-
-        if (sqlite3_finalize(insert_statement) != SQLITE_OK) {
-            EVLOG_error << "Error inserting into table";
-            throw std::runtime_error("db access error");
-        }
-    }
-
-    // prepare authorization cache
-    std::string create_auth_cache_sql = "CREATE TABLE IF NOT EXISTS AUTH_CACHE ("
-                                        "ID_TAG TEXT PRIMARY KEY     NOT NULL,"
-                                        "AUTH_STATUS TEXT NOT NULL,"
-                                        "EXPIRY_DATE TEXT,"
-                                        "PARENT_ID_TAG TEXT);";
-
-    sqlite3_stmt* create_auth_cache_statement;
-    sqlite3_prepare_v2(this->db, create_auth_cache_sql.c_str(), create_auth_cache_sql.size(),
-                       &create_auth_cache_statement, NULL);
-    int create_auth_cache_res = sqlite3_step(create_auth_cache_statement);
-    if (create_auth_cache_res != SQLITE_DONE) {
-        EVLOG_error << "Could not create table AUTH_CACHE: " << create_auth_cache_res << sqlite3_errmsg(this->db);
-        throw std::runtime_error("db access error");
-    }
-
-    if (sqlite3_finalize(create_auth_cache_statement) != SQLITE_OK) {
-        EVLOG_error << "Error creating table AUTH_CACHE";
-        throw std::runtime_error("db access error");
-    }
-
-    // prepare local auth list
-    std::string create_auth_list_version_sql = "CREATE TABLE IF NOT EXISTS AUTH_LIST_VERSION ("
-                                               "ID INT PRIMARY KEY     NOT NULL,"
-                                               "VERSION INT);";
-
-    sqlite3_stmt* create_auth_list_version_statement;
-    sqlite3_prepare_v2(this->db, create_auth_list_version_sql.c_str(), create_auth_list_version_sql.size(),
-                       &create_auth_list_version_statement, NULL);
-    int create_auth_list_version_res = sqlite3_step(create_auth_list_version_statement);
-    if (create_auth_list_version_res != SQLITE_DONE) {
-        EVLOG_error << "Could not create table AUTH_LIST_VERSION: " << create_auth_list_version_res
-                    << sqlite3_errmsg(this->db);
-        throw std::runtime_error("db access error");
-    }
-
-    if (sqlite3_finalize(create_auth_list_version_statement) != SQLITE_OK) {
-        EVLOG_error << "Error creating table AUTH_LIST_VERSION";
-        throw std::runtime_error("db access error");
-    }
-
-    std::ostringstream insert_auth_list_version_sql;
-    insert_auth_list_version_sql << "INSERT OR IGNORE INTO AUTH_LIST_VERSION (ID, VERSION) VALUES (0,0)";
-    std::string insert_auth_list_version_sql_str = insert_auth_list_version_sql.str();
-    sqlite3_stmt* insert_auth_list_version_statement;
-    sqlite3_prepare_v2(this->db, insert_auth_list_version_sql_str.c_str(), insert_auth_list_version_sql_str.size(),
-                       &insert_auth_list_version_statement, NULL);
-    int res_auth_list_version = sqlite3_step(insert_auth_list_version_statement);
-    if (res_auth_list_version != SQLITE_DONE) {
-        EVLOG_error << "Could not insert into table: " << res_auth_list_version << sqlite3_errmsg(this->db);
-        throw std::runtime_error("db access error");
-    }
-
-    if (sqlite3_finalize(insert_auth_list_version_statement) != SQLITE_OK) {
-        EVLOG_error << "Error inserting into table";
-        throw std::runtime_error("db access error");
-    }
-
-    std::string create_auth_list_sql = "CREATE TABLE IF NOT EXISTS AUTH_LIST ("
-                                       "ID_TAG TEXT PRIMARY KEY     NOT NULL,"
-                                       "AUTH_STATUS TEXT NOT NULL,"
-                                       "EXPIRY_DATE TEXT,"
-                                       "PARENT_ID_TAG TEXT);";
-
-    sqlite3_stmt* create_auth_list_statement;
-    sqlite3_prepare_v2(this->db, create_auth_list_sql.c_str(), create_auth_list_sql.size(), &create_auth_list_statement,
-                       NULL);
-    int create_auth_list_res = sqlite3_step(create_auth_list_statement);
-    if (create_auth_list_res != SQLITE_DONE) {
-        EVLOG_error << "Could not create table AUTH_LIST: " << create_auth_list_res << sqlite3_errmsg(this->db);
-        throw std::runtime_error("db access error");
-    }
-
-    if (sqlite3_finalize(create_auth_list_statement) != SQLITE_OK) {
-        EVLOG_error << "Error creating table AUTH_LIST";
-        throw std::runtime_error("db access error");
-    }
-
     // TODO(kai): get this from config
     this->supported_measurands = {{Measurand::Energy_Active_Import_Register, {Phase::L1, Phase::L2, Phase::L3}}, // Wh
                                   {Measurand::Energy_Active_Export_Register, {Phase::L1, Phase::L2, Phase::L3}}, // Wh
@@ -203,6 +75,10 @@ ChargePointConfiguration::ChargePointConfiguration(json config, std::string conf
                                   {Measurand::Frequency, {Phase::L1, Phase::L2, Phase::L3}},                     // Hz
                                   {Measurand::Current_Offered, {}}};                                             // A
 
+    if(!this->validate_measurands(config)) {
+        EVLOG_AND_THROW(std::runtime_error("Given Measurands are invalid"));
+    }
+    
     this->supported_message_types_from_charge_point = {
         {SupportedFeatureProfiles::Core,
          {MessageType::Authorize, MessageType::BootNotification, MessageType::ChangeAvailabilityResponse,
@@ -270,27 +146,12 @@ ChargePointConfiguration::ChargePointConfiguration(json config, std::string conf
     this->supported_message_types_receiving.insert(MessageType::ReserveNow);
 }
 
-void ChargePointConfiguration::close() {
-    EVLOG_info << "Closing database file...";
-    int ret = sqlite3_close(this->db);
-    if (ret == SQLITE_OK) {
-        EVLOG_info << "Successfully closed database file";
-    } else {
-        EVLOG_error << "Error closing database file: " << ret;
-    }
-}
-
-std::string ChargePointConfiguration::getConfigsPath() {
-    return this->configs_path;
-}
-
 std::shared_ptr<PkiHandler> ChargePointConfiguration::getPkiHandler() {
     return this->pki_handler;
 }
 
 json ChargePointConfiguration::get_user_config() {
-    auto user_config_path = boost::filesystem::path(this->getConfigsPath()) / "user_config" / "user_config.json";
-    if (boost::filesystem::exists(user_config_path)) {
+    if (boost::filesystem::exists(this->user_config_path)) {
         // reading from and overriding to existing user config
         std::fstream ifs(user_config_path.c_str());
         std::string user_config_file((std::istreambuf_iterator<char>(ifs)), (std::istreambuf_iterator<char>()));
@@ -302,10 +163,9 @@ json ChargePointConfiguration::get_user_config() {
 }
 
 void ChargePointConfiguration::setInUserConfig(std::string profile, std::string key, const json value) {
-    auto user_config_path = boost::filesystem::path(this->getConfigsPath()) / "user_config" / "user_config.json";
     json user_config = this->get_user_config();
     user_config[profile][key] = value;
-    std::ofstream ofs(user_config_path.c_str());
+    std::ofstream ofs(this->user_config_path.c_str());
     ofs << user_config << std::endl;
     ofs.close();
 }
@@ -379,6 +239,15 @@ bool ChargePointConfiguration::getLogMessages() {
     return this->config["Internal"]["LogMessages"];
 }
 
+std::vector<ChargingProfilePurposeType> ChargePointConfiguration::getSupportedChargingProfilePurposeTypes() {
+    std::vector<ChargingProfilePurposeType> supported_purpose_types;
+    const auto str_list = this->config["Internal"]["SupportedChargingProfilePurposeTypes"];
+    for (const auto& str : str_list) {
+        supported_purpose_types.push_back(conversions::string_to_charging_profile_purpose_type(str));
+    }
+    return supported_purpose_types;
+}
+
 std::string ChargePointConfiguration::getSupportedCiphers12() {
 
     std::vector<std::string> supported_ciphers = this->config["Internal"]["SupportedCiphers12"];
@@ -398,36 +267,24 @@ std::vector<MeasurandWithPhase> ChargePointConfiguration::csv_to_measurand_with_
     std::vector<MeasurandWithPhase> measurand_with_phase_vector;
     for (auto component : components) {
         MeasurandWithPhase measurand_with_phase;
-        try {
-            Measurand measurand = ocpp1_6::conversions::string_to_measurand(component);
-            // check if this measurand can be provided on multiple phases
-            if (this->supported_measurands[measurand].size() > 0) {
-                // multiple phases are available
-                // also add the measurand without a phase as a total value
-                measurand_with_phase.measurand = measurand;
-                measurand_with_phase_vector.push_back(measurand_with_phase);
+        Measurand measurand = ocpp1_6::conversions::string_to_measurand(component);
+        // check if this measurand can be provided on multiple phases
+        if (this->supported_measurands[measurand].size() > 0) {
+            // multiple phases are available
+            // also add the measurand without a phase as a total value
+            measurand_with_phase.measurand = measurand;
+            measurand_with_phase_vector.push_back(measurand_with_phase);
 
-                for (auto phase : this->supported_measurands[measurand]) {
-                    measurand_with_phase.phase.emplace(phase);
-                    if (std::find(measurand_with_phase_vector.begin(), measurand_with_phase_vector.end(),
-                                  measurand_with_phase) == measurand_with_phase_vector.end()) {
-                        measurand_with_phase_vector.push_back(measurand_with_phase);
-                    }
-                }
-            } else {
-                // this is a measurand without any phase support
-                measurand_with_phase.measurand = measurand;
+            for (auto phase : this->supported_measurands[measurand]) {
+                measurand_with_phase.phase.emplace(phase);
                 if (std::find(measurand_with_phase_vector.begin(), measurand_with_phase_vector.end(),
                               measurand_with_phase) == measurand_with_phase_vector.end()) {
                     measurand_with_phase_vector.push_back(measurand_with_phase);
                 }
             }
-        } catch (std::out_of_range& o) {
-            std::vector<std::string> measurand_with_phase_vec;
-            iter_split(measurand_with_phase_vec, component, boost::algorithm::last_finder("."));
-            measurand_with_phase.measurand = ocpp1_6::conversions::string_to_measurand(measurand_with_phase_vec.at(0));
-            measurand_with_phase.phase.emplace(ocpp1_6::conversions::string_to_phase(measurand_with_phase_vec.at(1)));
-
+        } else {
+            // this is a measurand without any phase support
+            measurand_with_phase.measurand = measurand;
             if (std::find(measurand_with_phase_vector.begin(), measurand_with_phase_vector.end(),
                           measurand_with_phase) == measurand_with_phase_vector.end()) {
                 measurand_with_phase_vector.push_back(measurand_with_phase);
@@ -445,7 +302,37 @@ std::vector<MeasurandWithPhase> ChargePointConfiguration::csv_to_measurand_with_
     return measurand_with_phase_vector;
 }
 
+bool ChargePointConfiguration::validate_measurands(const json &config) {
+    std::vector<std::string> measurands_vector;
+    
+    // validate measurands of all these configuration keys
+    measurands_vector.push_back(config["Core"]["MeterValuesAlignedData"]);
+    measurands_vector.push_back(config["Core"]["MeterValuesSampledData"]);
+    measurands_vector.push_back(config["Core"]["StopTxnAlignedData"]);
+    measurands_vector.push_back(config["Core"]["StopTxnSampledData"]);
+
+    for (const auto &measurands : measurands_vector) {
+        if (!this->measurands_supported(measurands)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool ChargePointConfiguration::measurands_supported(std::string csv) {
+
+    std::vector<std::string> components;
+
+    boost::split(components, csv, boost::is_any_of(","));
+    for (auto component : components) {
+        try {
+            conversions::string_to_measurand(component);
+        } catch (std::out_of_range& o) {
+            EVLOG_warning << "Measurand: " << component << " is not supported!";
+            return false;
+        }
+    }
+
     auto requested_measurands = this->csv_to_measurand_with_phase_vector(csv);
     // check if the requested measurands are supported, otherwise return false
     for (auto req : requested_measurands) {
@@ -473,454 +360,6 @@ std::set<MessageType> ChargePointConfiguration::getSupportedMessageTypesSending(
 std::set<MessageType> ChargePointConfiguration::getSupportedMessageTypesReceiving() {
     return this->supported_message_types_receiving;
 }
-
-bool ChargePointConfiguration::setConnectorAvailability(int32_t connectorId, AvailabilityType availability) {
-    int32_t number_of_connectors = this->getNumberOfConnectors();
-    if (connectorId > number_of_connectors) {
-        EVLOG_warning << "trying to set the availability of a connector that does not exist: " << connectorId
-                      << ", there are only " << number_of_connectors << " connectors.";
-        return false;
-    }
-    std::vector<int32_t> connectors;
-    if (connectorId == 0) {
-        EVLOG_debug << "changing availability of all connectors";
-        for (int32_t i = 1; i <= number_of_connectors; i++) {
-            connectors.push_back(i);
-        }
-    } else {
-        connectors.push_back(connectorId);
-    }
-
-    for (auto connector : connectors) {
-        std::ostringstream insert_sql;
-        insert_sql << "INSERT OR REPLACE INTO CONNECTORS (ID, AVAILABILITY) VALUES (" << connector << ", \""
-                   << conversions::availability_type_to_string(availability) << "\")";
-        std::string insert_sql_str = insert_sql.str();
-        sqlite3_stmt* insert_statement;
-        sqlite3_prepare_v2(db, insert_sql_str.c_str(), insert_sql_str.size(), &insert_statement, NULL);
-        int res = sqlite3_step(insert_statement);
-        if (res != SQLITE_DONE) {
-            EVLOG_error << "Could not insert into table: " << res << sqlite3_errmsg(db);
-            throw std::runtime_error("db access error");
-        }
-
-        if (sqlite3_finalize(insert_statement) != SQLITE_OK) {
-            EVLOG_error << "Error inserting into table";
-            throw std::runtime_error("db access error");
-        }
-    }
-
-    return true;
-}
-AvailabilityType ChargePointConfiguration::getConnectorAvailability(int32_t connectorId) {
-    std::ostringstream select_sql;
-    std::promise<ocpp1_6::AvailabilityType>* sql_promise = new std::promise<ocpp1_6::AvailabilityType>();
-    std::future<ocpp1_6::AvailabilityType> sql_future = sql_promise->get_future();
-
-    select_sql << "SELECT AVAILABILITY FROM CONNECTORS WHERE ID = " << connectorId << ";";
-    std::string select_sql_str = select_sql.str();
-    char* error = nullptr;
-    int res = sqlite3_exec(
-        db, select_sql_str.c_str(),
-        [](void* sql_promise, int count, char** results, char** column_name) -> int {
-            if (count == 1) {
-                static_cast<std::promise<ocpp1_6::AvailabilityType>*>(sql_promise)
-                    ->set_value(ocpp1_6::conversions::string_to_availability_type(results[0]));
-            }
-            return 0;
-        },
-        (void*)sql_promise, &error);
-
-    std::chrono::time_point<date::utc_clock> sql_wait = date::utc_clock::now() + ocpp1_6::future_wait_seconds;
-    std::future_status sql_future_status;
-    do {
-        sql_future_status = sql_future.wait_until(sql_wait);
-    } while (sql_future_status == std::future_status::deferred);
-    if (sql_future_status == std::future_status::timeout) {
-        EVLOG_debug << "sql future timeout";
-    } else if (sql_future_status == std::future_status::ready) {
-        EVLOG_debug << "sql future ready";
-    }
-
-    ocpp1_6::AvailabilityType response = sql_future.get();
-    return response;
-}
-
-std::map<int32_t, ocpp1_6::AvailabilityType> ChargePointConfiguration::getConnectorAvailability() {
-    std::ostringstream select_sql;
-    std::promise<std::map<int32_t, ocpp1_6::AvailabilityType>>* sql_promise =
-        new std::promise<std::map<int32_t, ocpp1_6::AvailabilityType>>();
-    std::future<std::map<int32_t, ocpp1_6::AvailabilityType>> sql_future = sql_promise->get_future();
-
-    select_sql << "SELECT AVAILABILITY FROM CONNECTORS";
-    std::string select_sql_str = select_sql.str();
-    char* error = nullptr;
-    int res = sqlite3_exec(
-        db, select_sql_str.c_str(),
-        [](void* sql_promise, int count, char** results, char** column_name) -> int {
-            std::map<int32_t, ocpp1_6::AvailabilityType> connector_availability;
-            for (int connector = 0; connector < count; connector++) {
-                connector_availability[connector + 1] =
-                    ocpp1_6::conversions::string_to_availability_type(results[connector]);
-            }
-            static_cast<std::promise<std::map<int32_t, ocpp1_6::AvailabilityType>>*>(sql_promise)
-                ->set_value(connector_availability);
-            return 0;
-        },
-        (void*)sql_promise, &error);
-
-    std::chrono::time_point<date::utc_clock> sql_wait = date::utc_clock::now() + ocpp1_6::future_wait_seconds;
-    std::future_status sql_future_status;
-    do {
-        sql_future_status = sql_future.wait_until(sql_wait);
-    } while (sql_future_status == std::future_status::deferred);
-    if (sql_future_status == std::future_status::timeout) {
-        EVLOG_debug << "sql future timeout";
-    } else if (sql_future_status == std::future_status::ready) {
-        EVLOG_debug << "sql future ready";
-    }
-
-    std::map<int32_t, ocpp1_6::AvailabilityType> response = sql_future.get();
-    return response;
-}
-
-bool ChargePointConfiguration::updateAuthorizationCacheEntry(CiString20Type idTag, IdTagInfo idTagInfo) {
-    if (!this->getAuthorizationCacheEnabled()) {
-        return false;
-    }
-    std::ostringstream insert_sql;
-    insert_sql << "INSERT OR REPLACE INTO AUTH_CACHE (ID_TAG, AUTH_STATUS, EXPIRY_DATE, PARENT_ID_TAG) VALUES "
-                  "(@id_tag, @auth_status, @expiry_date, @parent_id_tag)";
-    std::string insert_sql_str = insert_sql.str();
-    sqlite3_stmt* insert_statement;
-    sqlite3_prepare_v2(db, insert_sql_str.c_str(), insert_sql_str.size(), &insert_statement, NULL);
-
-    auto idTag_str = idTag.get();
-    auto idTagInfo_str = ocpp1_6::conversions::authorization_status_to_string(idTagInfo.status);
-    sqlite3_bind_text(insert_statement, 1, idTag_str.c_str(), -1, NULL);
-    sqlite3_bind_text(insert_statement, 2, idTagInfo_str.c_str(), -1, NULL);
-    if (idTagInfo.expiryDate) {
-        auto expiryDate_str = idTagInfo.expiryDate.value().to_rfc3339();
-        sqlite3_bind_text(insert_statement, 3, expiryDate_str.c_str(), -1, SQLITE_TRANSIENT);
-    }
-    if (idTagInfo.parentIdTag) {
-        auto parentIdTag_str = idTagInfo.parentIdTag.value().get();
-        sqlite3_bind_text(insert_statement, 4, parentIdTag_str.c_str(), -1, SQLITE_TRANSIENT);
-    }
-
-    int res = sqlite3_step(insert_statement);
-    if (res != SQLITE_DONE) {
-        EVLOG_error << "Could not insert into table: " << res << sqlite3_errmsg(db);
-        throw std::runtime_error("db access error");
-    }
-
-    if (sqlite3_finalize(insert_statement) != SQLITE_OK) {
-        EVLOG_error << "Error inserting into table";
-        throw std::runtime_error("db access error");
-    }
-
-    return true;
-}
-
-bool ChargePointConfiguration::clearAuthorizationCache() {
-    if (!this->getAuthorizationCacheEnabled()) {
-        return false;
-    }
-
-    std::string clear_sql_str = "DELETE FROM AUTH_CACHE;";
-    sqlite3_stmt* clear_statement;
-    sqlite3_prepare_v2(db, clear_sql_str.c_str(), clear_sql_str.size(), &clear_statement, NULL);
-    int res = sqlite3_step(clear_statement);
-    if (res != SQLITE_DONE) {
-        EVLOG_error << "Could not clear AUTH_CACHE table: " << res << sqlite3_errmsg(db);
-        return false;
-    }
-
-    if (sqlite3_finalize(clear_statement) != SQLITE_OK) {
-        EVLOG_error << "Error clearing table";
-        throw std::runtime_error("db access error");
-    }
-
-    return true;
-}
-
-boost::optional<IdTagInfo> ChargePointConfiguration::getAuthorizationCacheEntry(CiString20Type idTag) {
-    if (!this->getAuthorizationCacheEnabled()) {
-        return boost::none;
-    }
-    std::ostringstream select_sql;
-    select_sql << "SELECT ID_TAG, AUTH_STATUS, EXPIRY_DATE, PARENT_ID_TAG FROM AUTH_CACHE WHERE ID_TAG = @id_tag";
-    std::string select_sql_str = select_sql.str();
-    sqlite3_stmt* select_statement;
-    sqlite3_prepare_v2(db, select_sql_str.c_str(), select_sql_str.size(), &select_statement, NULL);
-
-    auto idTag_str = idTag.get();
-    sqlite3_bind_text(select_statement, 1, idTag_str.c_str(), -1, NULL);
-
-    int res = sqlite3_step(select_statement);
-    if (res != SQLITE_ROW) {
-        // no idTag with that name exists in the cache
-        return boost::none;
-    }
-
-    IdTagInfo idTagInfo;
-    std::string auth_status_str = std::string(reinterpret_cast<const char*>(sqlite3_column_text(select_statement, 1)));
-
-    idTagInfo.status = conversions::string_to_authorization_status(auth_status_str);
-    auto expiry_date_ptr = sqlite3_column_text(select_statement, 2);
-    if (expiry_date_ptr != nullptr) {
-        std::string expiry_date_str = std::string(reinterpret_cast<const char*>(expiry_date_ptr));
-        EVLOG_debug << "expiry_date_str available: " << expiry_date_str;
-        auto expiry_date = DateTime(expiry_date_str);
-        idTagInfo.expiryDate.emplace(expiry_date);
-    } else {
-        EVLOG_debug << "expiry_date_str not available";
-    }
-
-    auto parent_id_tag_ptr = sqlite3_column_text(select_statement, 3);
-    if (parent_id_tag_ptr != nullptr) {
-        std::string parent_id_tag_str = std::string(reinterpret_cast<const char*>(parent_id_tag_ptr));
-        EVLOG_debug << "parent_id_tag_str available: " << parent_id_tag_str;
-        idTagInfo.parentIdTag.emplace(parent_id_tag_str);
-    } else {
-        EVLOG_debug << "parent_id_tag_str not available";
-    }
-
-    if (sqlite3_finalize(select_statement) != SQLITE_OK) {
-        EVLOG_error << "Error selecting from table";
-        throw std::runtime_error("db access error");
-    }
-
-    // check if expiry date is set and the entr should be set to Expired
-    if (idTagInfo.status != AuthorizationStatus::Expired) {
-        if (idTagInfo.expiryDate) {
-            auto now = DateTime();
-            if (idTagInfo.expiryDate.get() <= now) {
-                EVLOG_info << "IdTag " << idTag
-                           << " in auth cache has expiry date in the past, setting entry to expired.";
-                idTagInfo.status = AuthorizationStatus::Expired;
-                this->updateAuthorizationCacheEntry(idTag, idTagInfo);
-            }
-        }
-    }
-
-    return idTagInfo;
-}
-
-// Local Auth List Management
-
-int32_t ChargePointConfiguration::getLocalListVersion() {
-    std::promise<int32_t>* sql_promise = new std::promise<int32_t>();
-    std::future<int32_t> sql_future = sql_promise->get_future();
-
-    std::string select_sql_str = "SELECT VERSION FROM AUTH_LIST_VERSION WHERE ID = 0;";
-    char* error = nullptr;
-    int res = sqlite3_exec(
-        db, select_sql_str.c_str(),
-        [](void* sql_promise, int count, char** results, char** column_name) -> int {
-            if (count == 1) {
-                static_cast<std::promise<int32_t>*>(sql_promise)->set_value(std::stoi(results[0]));
-            }
-            return 0;
-        },
-        (void*)sql_promise, &error);
-
-    std::chrono::time_point<date::utc_clock> sql_wait = date::utc_clock::now() + ocpp1_6::future_wait_seconds;
-    std::future_status sql_future_status;
-    do {
-        sql_future_status = sql_future.wait_until(sql_wait);
-    } while (sql_future_status == std::future_status::deferred);
-    if (sql_future_status == std::future_status::timeout) {
-        EVLOG_debug << "sql future timeout";
-    } else if (sql_future_status == std::future_status::ready) {
-        EVLOG_debug << "sql future ready";
-    }
-
-    int32_t response = sql_future.get();
-    return response;
-}
-
-bool ChargePointConfiguration::updateLocalAuthorizationListVersion(int32_t list_version) {
-    std::ostringstream insert_sql;
-    insert_sql << "INSERT OR REPLACE INTO AUTH_LIST_VERSION (ID, VERSION) VALUES (0, \"" << std::to_string(list_version)
-               << "\")";
-    std::string insert_sql_str = insert_sql.str();
-    sqlite3_stmt* insert_statement;
-    sqlite3_prepare_v2(db, insert_sql_str.c_str(), insert_sql_str.size(), &insert_statement, NULL);
-    int res = sqlite3_step(insert_statement);
-    if (res != SQLITE_DONE) {
-        EVLOG_error << "Could not insert into table: " << res << sqlite3_errmsg(db);
-        throw std::runtime_error("db access error");
-    }
-
-    if (sqlite3_finalize(insert_statement) != SQLITE_OK) {
-        EVLOG_error << "Error inserting into table";
-        throw std::runtime_error("db access error");
-    }
-
-    return true;
-}
-
-bool ChargePointConfiguration::updateLocalAuthorizationList(
-    std::vector<LocalAuthorizationList> local_authorization_list) {
-    if (!this->getLocalAuthListEnabled()) {
-        return false;
-    }
-
-    for (auto& authorization_data : local_authorization_list) {
-        auto idTag = authorization_data.idTag;
-        if (authorization_data.idTagInfo) {
-            // add or replace
-            auto idTagInfo = authorization_data.idTagInfo.get();
-            std::ostringstream insert_sql;
-            insert_sql << "INSERT OR REPLACE INTO AUTH_LIST (ID_TAG, AUTH_STATUS, EXPIRY_DATE, PARENT_ID_TAG) VALUES "
-                          "(@id_tag, @auth_status, @expiry_date, @parent_id_tag)";
-            std::string insert_sql_str = insert_sql.str();
-            sqlite3_stmt* insert_statement;
-            sqlite3_prepare_v2(db, insert_sql_str.c_str(), insert_sql_str.size(), &insert_statement, NULL);
-
-            auto idTag_str = idTag.get();
-            auto idTagInfo_str = ocpp1_6::conversions::authorization_status_to_string(idTagInfo.status);
-            sqlite3_bind_text(insert_statement, 1, idTag_str.c_str(), -1, NULL);
-            sqlite3_bind_text(insert_statement, 2, idTagInfo_str.c_str(), -1, NULL);
-            if (idTagInfo.expiryDate) {
-                auto expiryDate_str = idTagInfo.expiryDate.value().to_rfc3339();
-                sqlite3_bind_text(insert_statement, 3, expiryDate_str.c_str(), -1, SQLITE_TRANSIENT);
-            }
-            if (idTagInfo.parentIdTag) {
-                auto parentIdTag_str = idTagInfo.parentIdTag.value().get();
-                sqlite3_bind_text(insert_statement, 4, parentIdTag_str.c_str(), -1, SQLITE_TRANSIENT);
-            }
-
-            int res = sqlite3_step(insert_statement);
-            if (res != SQLITE_DONE) {
-                EVLOG_error << "Could not insert into table: " << res << sqlite3_errmsg(db);
-                throw std::runtime_error("db access error");
-            }
-
-            if (sqlite3_finalize(insert_statement) != SQLITE_OK) {
-                EVLOG_error << "Error inserting into table";
-                throw std::runtime_error("db access error");
-            }
-        } else {
-            // remove
-            std::ostringstream delete_sql;
-            delete_sql << "DELETE FROM AUTH_LIST WHERE ID_TAG = @id_tag;";
-            std::string delete_sql_str = delete_sql.str();
-            sqlite3_stmt* delete_statement;
-            sqlite3_prepare_v2(db, delete_sql_str.c_str(), delete_sql_str.size(), &delete_statement, NULL);
-
-            auto idTag_str = idTag.get();
-            sqlite3_bind_text(delete_statement, 1, idTag_str.c_str(), -1, NULL);
-
-            int res = sqlite3_step(delete_statement);
-            if (res != SQLITE_DONE) {
-                EVLOG_error << "Could not delete from table: " << res << sqlite3_errmsg(db);
-                throw std::runtime_error("db access error");
-            }
-
-            if (sqlite3_finalize(delete_statement) != SQLITE_OK) {
-                EVLOG_error << "Error deleting from table";
-                throw std::runtime_error("db access error");
-            }
-        }
-    }
-
-    return true;
-}
-
-bool ChargePointConfiguration::clearLocalAuthorizationList() {
-    if (!this->getLocalAuthListEnabled()) {
-        return false;
-    }
-
-    std::string clear_sql_str = "DELETE FROM AUTH_LIST;";
-    sqlite3_stmt* clear_statement;
-    sqlite3_prepare_v2(db, clear_sql_str.c_str(), clear_sql_str.size(), &clear_statement, NULL);
-    int res = sqlite3_step(clear_statement);
-    if (res != SQLITE_DONE) {
-        EVLOG_error << "Could not clear AUTH_LIST table: " << res << sqlite3_errmsg(db);
-        return false;
-    }
-
-    if (sqlite3_finalize(clear_statement) != SQLITE_OK) {
-        EVLOG_error << "Error clearing table";
-        throw std::runtime_error("db access error");
-    }
-
-    return true;
-}
-
-boost::optional<IdTagInfo> ChargePointConfiguration::getLocalAuthorizationListEntry(CiString20Type idTag) {
-    if (!this->getLocalAuthListEnabled()) {
-        return boost::none;
-    }
-    std::ostringstream select_sql;
-    select_sql << "SELECT ID_TAG, AUTH_STATUS, EXPIRY_DATE, PARENT_ID_TAG FROM AUTH_LIST WHERE ID_TAG = @id_tag";
-    std::string select_sql_str = select_sql.str();
-    sqlite3_stmt* select_statement;
-    sqlite3_prepare_v2(db, select_sql_str.c_str(), select_sql_str.size(), &select_statement, NULL);
-
-    auto idTag_str = idTag.get();
-    sqlite3_bind_text(select_statement, 1, idTag_str.c_str(), -1, NULL);
-
-    int res = sqlite3_step(select_statement);
-    if (res != SQLITE_ROW) {
-        // no idTag with that name exists in the list
-        return boost::none;
-    }
-
-    IdTagInfo idTagInfo;
-    std::string auth_status_str = std::string(reinterpret_cast<const char*>(sqlite3_column_text(select_statement, 1)));
-
-    idTagInfo.status = conversions::string_to_authorization_status(auth_status_str);
-    auto expiry_date_ptr = sqlite3_column_text(select_statement, 2);
-    if (expiry_date_ptr != nullptr) {
-        std::string expiry_date_str = std::string(reinterpret_cast<const char*>(expiry_date_ptr));
-        EVLOG_debug << "expiry_date_str available: " << expiry_date_str;
-        auto expiry_date = DateTime(expiry_date_str);
-        idTagInfo.expiryDate.emplace(expiry_date);
-    } else {
-        EVLOG_debug << "expiry_date_str not available";
-    }
-
-    auto parent_id_tag_ptr = sqlite3_column_text(select_statement, 3);
-    if (parent_id_tag_ptr != nullptr) {
-        std::string parent_id_tag_str = std::string(reinterpret_cast<const char*>(parent_id_tag_ptr));
-        EVLOG_debug << "parent_id_tag_str available: " << parent_id_tag_str;
-        idTagInfo.parentIdTag.emplace(parent_id_tag_str);
-    } else {
-        EVLOG_debug << "parent_id_tag_str not available";
-    }
-
-    if (sqlite3_finalize(select_statement) != SQLITE_OK) {
-        EVLOG_error << "Error selecting from table";
-        throw std::runtime_error("db access error");
-    }
-
-    // check if expiry date is set and the entry should be set to Expired
-    // FIXME: should this really be done with an authorization list?
-    if (idTagInfo.status != AuthorizationStatus::Expired) {
-        if (idTagInfo.expiryDate) {
-            auto now = DateTime();
-            if (idTagInfo.expiryDate.get() <= now) {
-                EVLOG_info << "IdTag " << idTag
-                           << " in auth list has expiry date in the past, setting entry to expired.";
-                idTagInfo.status = AuthorizationStatus::Expired;
-                std::vector<LocalAuthorizationList> local_auth_list;
-                LocalAuthorizationList local_auth_list_entry;
-                local_auth_list_entry.idTag = idTag;
-                local_auth_list_entry.idTagInfo.emplace(idTagInfo);
-                local_auth_list.push_back(local_auth_list_entry);
-                this->updateLocalAuthorizationList(local_auth_list);
-            }
-        }
-    }
-
-    return idTagInfo;
-}
-
-// Core Profile start
 
 // Core Profile - optional
 boost::optional<bool> ChargePointConfiguration::getAllowOfflineTxForUnknownId() {
@@ -2410,15 +1849,4 @@ ConfigurationStatus ChargePointConfiguration::set(CiString50Type key, CiString50
 
     return ConfigurationStatus::Accepted;
 }
-
-std::vector<ScheduledCallback> ChargePointConfiguration::getScheduledCallbacks() {
-    // TODO(piet): Implement this
-    std::vector<ScheduledCallback> callbacks;
-    return callbacks;
-}
-
-void ChargePointConfiguration::insertScheduledCallback(ScheduledCallbackType, std::string datetime, std::string args) {
-    // TODO(piet): Implement this
-}
-
 } // namespace ocpp1_6

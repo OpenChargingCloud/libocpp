@@ -49,6 +49,7 @@ MessageQueue::MessageQueue(std::shared_ptr<ChargePointConfiguration> configurati
             ControlMessage* message = nullptr;
             QueueType queue_type = QueueType::None;
 
+            // send normal messages first
             if (!this->normal_message_queue.empty()) {
                 auto& normal_message = this->normal_message_queue.front();
                 EVLOG_debug << "normal msg timestamp: " << normal_message->timestamp;
@@ -62,7 +63,8 @@ MessageQueue::MessageQueue(std::shared_ptr<ChargePointConfiguration> configurati
                 }
             }
 
-            if (!this->transaction_message_queue.empty()) {
+            // send transaction messages when normal message queue is empty
+            if (!this->transaction_message_queue.empty() && message == nullptr) {
                 auto& transaction_message = this->transaction_message_queue.front();
                 EVLOG_debug << "transaction msg timestamp: " << transaction_message->timestamp;
                 if (message == nullptr) {
@@ -70,8 +72,6 @@ MessageQueue::MessageQueue(std::shared_ptr<ChargePointConfiguration> configurati
                         EVLOG_debug << "transaction message timestamp <= now";
                         message = transaction_message;
                         queue_type = QueueType::Transaction;
-                    } else {
-                        // EVLOG_critical << "WAITING FOR REPEAT";
                     }
                 } else {
                     if (transaction_message->timestamp <= message->timestamp) {
@@ -94,7 +94,7 @@ MessageQueue::MessageQueue(std::shared_ptr<ChargePointConfiguration> configurati
             this->in_flight = message;
 
             if (this->message_id_transaction_id_map.count(this->in_flight->message.at(1))) {
-                EVLOG_critical << "Replacing transaction id";
+                EVLOG_debug << "Replacing transaction id";
                 this->in_flight->message.at(3)["transactionId"] =
                     this->message_id_transaction_id_map.at(this->in_flight->message.at(1));
                 this->message_id_transaction_id_map.erase(this->in_flight->message.at(1));
@@ -143,7 +143,7 @@ MessageQueue::MessageQueue(std::shared_ptr<ChargePointConfiguration> configurati
 }
 
 MessageId MessageQueue::getMessageId(const json::array_t& json_message) {
-    return MessageId(json_message.at(MESSAGE_ID));
+    return MessageId(json_message.at(MESSAGE_ID).get<std::string>());
 }
 
 MessageTypeId MessageQueue::getMessageTypeId(const json::array_t& json_message) {
@@ -298,7 +298,13 @@ EnhancedMessage MessageQueue::receive(const std::string& message) {
                         this->in_flight->message.at(CALL_ACTION).get<std::string>() + std::string("Response"));
                     this->in_flight->promise.set_value(enhanced_message);
                     this->in_flight = nullptr;
-                    this->cv.notify_one();
+
+                    // we want the start transaction response handler to be executed before the next message will be
+                    // send in order to be able to replace the transaction id if necessary
+                    // start transaction response handler will notify
+                    if (enhanced_message.messageType != MessageType::StartTransactionResponse) {
+                        this->cv.notify_one();
+                    }
                 }
             }
         }
@@ -316,6 +322,7 @@ void MessageQueue::stop() {
     // stop the running thread
     this->running = false;
     this->cv.notify_one();
+    this->worker_thread.join();
     EVLOG_debug << "stop() notified message queue";
 }
 
@@ -342,9 +349,12 @@ MessageId MessageQueue::createMessageId() {
 }
 
 void MessageQueue::add_stopped_transaction_id(std::string stop_transaction_message_id, int32_t transaction_id) {
-
-    EVLOG_critical << "adding " << stop_transaction_message_id << " for transaction " << transaction_id;
+    EVLOG_debug << "adding " << stop_transaction_message_id << " for transaction " << transaction_id;
     this->message_id_transaction_id_map[stop_transaction_message_id] = transaction_id;
+}
+
+void MessageQueue::notify_start_transaction_handled() {
+    this->cv.notify_one();
 }
 
 } // namespace ocpp1_6

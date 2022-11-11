@@ -1,5 +1,6 @@
 set(OCPP1_6_PROFILE_SCHEMAS_DIR "profile_schemas/ocpp1_6/")
 set(USER_CONFIG_FILE "${CMAKE_CURRENT_SOURCE_DIR}/user_config/user_config.json")
+set(SQL_INIT_FILE "${CMAKE_CURRENT_SOURCE_DIR}/init.sql")
 set(CERTS_DIR "certs/")
 
 list(APPEND OCPP1_6_PROFILE_SCHEMAS
@@ -16,8 +17,10 @@ list(APPEND OCPP1_6_PROFILE_SCHEMAS
 list(TRANSFORM OCPP1_6_PROFILE_SCHEMAS
      PREPEND ${OCPP1_6_PROFILE_SCHEMAS_DIR})
 
-install(FILES ${OCPP1_6_PROFILE_SCHEMAS}
-        DESTINATION ocpp/profile_schemas/ocpp1_6)
+install(
+     FILES ${OCPP1_6_PROFILE_SCHEMAS}
+     DESTINATION ${CMAKE_INSTALL_DATADIR}/everest/ocpp/profile_schemas/ocpp1_6
+)
 
 list(APPEND CONFIGS
      config.json
@@ -26,11 +29,19 @@ list(APPEND CONFIGS
      logging.ini
 )
 
-install(FILES ${CONFIGS}
-        DESTINATION ocpp)
+install(
+     FILES ${CONFIGS}
+     DESTINATION ${CMAKE_INSTALL_DATADIR}/everest/ocpp
+)
 
-install (DIRECTORY ${CERTS_DIR} DESTINATION ocpp/certs)
+install(
+     DIRECTORY ${CERTS_DIR}
+     DESTINATION ${CMAKE_INSTALL_DATADIR}/everest/ocpp/certs)
+
+install(FILES ${SQL_INIT_FILE} DESTINATION ${CMAKE_INSTALL_DATADIR}/everest/ocpp)
 
 if(EXISTS ${USER_CONFIG_FILE})
-     install(FILES ${USER_CONFIG_FILE} DESTINATION ocpp/user_config)
+     install(
+          FILES ${USER_CONFIG_FILE}
+          DESTINATION ${CMAKE_INSTALL_DATADIR}/everest/ocpp)
 endif()
